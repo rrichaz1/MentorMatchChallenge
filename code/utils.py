@@ -6,6 +6,22 @@ import pandas as pd
 timezonemap ={'IST': 0,'CET': 2,'EST': 3, 'CST': 4, 'MST': 5, 'PST':6}
 model = SentenceTransformer('stsb-roberta-large')
 
+
+regexPattern = '\[(.+?)\]'
+
+#This converts string that is formatted as '[1,2,3,4]' to a real list so that the colmn can be exploded
+def strToList(stringToConvert):
+    strlist =[]
+    str_found = stringToConvert
+    try:
+        str_found = re.search(regexPattern, stringToConvert).group(1)
+    except:
+        strlist = np.nan
+    else:    
+        strlist = str_found.split(',')
+        #convert strings to ints
+    return list(map(int, strlist))
+
 def intersection(lst1, lst2):
  
     #https://www.geeksforgeeks.org/python-intersection-two-lists/
@@ -39,7 +55,7 @@ def check_mentorgrade_eligibility(mentor_row, mentee_row,  result):
     else:
         result['Mentee_Grade'] = int(re.search(r'[0-9]+', mentee_row['Mentee_GradeLevel'].iloc[0]).group())
         
-    if result['Mentor_Grade'] <= 28 :
+    if result['Mentor_Grade'] < 28 :
         result['Mentor_Eligible_Error'] = 1
     else:
         result['Mentor_Eligible_Error'] = 0
@@ -140,19 +156,22 @@ def calculateCircleLevelScore(regroup_DF, Mentee_Department_In_Circle_Error_Grou
     
     Circle_Summary_DF = pd.DataFrame()
 
-    score = 0
+    bonus = 0
+    penalty = 0
     for row in regroup_dict:
         circle = row[('Circle', '')]
         Circle_Summary_Dict['Circle'] = circle
-        penalty = calculateCircleLevelPenaltyScore(row, Circle_Summary_Dict, circle, Mentee_Department_In_Circle_Error_Group)
-        bonus = calculateCircleLevelBonusScore(row, Circle_Summary_Dict)
-        score += (penalty+bonus)
+        penalty += calculateCircleLevelPenaltyScore(row, Circle_Summary_Dict, circle, Mentee_Department_In_Circle_Error_Group)
+        bonus += calculateCircleLevelBonusScore(row, Circle_Summary_Dict)
         Circle_Summary_DF = Circle_Summary_DF.append(Circle_Summary_Dict, ignore_index=True)
+        
     
-    return (score, Circle_Summary_DF)
+   
+    return (penalty, bonus, Circle_Summary_DF)
 
 def calculateCircleLevelPenaltyScore(row, Circle_Summary_Dict, circle, Mentee_Department_In_Circle_Error_Group):    
     # 2 mentors cannot be assigned to 
+    
     score = 0
     mentorUnique = row[('Mentor_ID', 'nunique')]
     Circle_Summary_Dict['Unique Mentors']  = mentorUnique
@@ -206,7 +225,8 @@ def calculateCircleLevelPenaltyScore(row, Circle_Summary_Dict, circle, Mentee_De
     #More than 2 Mentees should not be from same department in the same circle   
     menteeDeptUnique = row[('Mentee_Department', 'nunique')]
     Circle_Summary_Dict['Unique Mentee Departments']  = menteeDeptUnique
-    menteeDeptError = 1 if menteeUnique - menteeDeptUnique else 0
+    Circle_Summary_Dict['Mentees belonging to same Department']  = menteeUnique - menteeDeptUnique
+    menteeDeptError = 1 if (menteeUnique - menteeDeptUnique) > 2 else 0
     Circle_Summary_Dict['Mentee Mentor Department Penalty'] = 0
     Circle_Summary_Dict['Mentee Mentor Department Error'] =mentorMenteeDeptError
     if mentorMenteeDeptError:
@@ -228,6 +248,18 @@ def calculateCircleLevelPenaltyScore(row, Circle_Summary_Dict, circle, Mentee_De
         Circle_Summary_Dict['Mentor Mentee Circle Penalty'] = -1
         score -= 1
         
+        # Mentors spread across time zones - makes it difficult to manage    
+    menteeGradeMax = row[('Mentee_Grade', 'max')] 
+    menteeGradeMin = row[('Mentee_Grade', 'min')]    
+    Circle_Summary_Dict['Mentee Grade Max'] = menteeGradeMax
+    Circle_Summary_Dict['Mentee Grade Min'] = menteeGradeMin
+    menteeGradeSpan =  menteeGradeMax - menteeGradeMin
+    Circle_Summary_Dict['Mentee Grade Span'] = menteeGradeSpan
+    Circle_Summary_Dict['Mentee Mentor Grade Penalty'] = 0
+    if menteeGradeSpan > 3:
+        Circle_Summary_Dict['Mentee Mentor Grade Penalty'] = -1
+        score -= 1    
+        
     return score    
 
 def calculateCircleLevelBonusScore(row, Circle_Summary_Dict):    
@@ -244,7 +276,7 @@ def calculateCircleLevelBonusScore(row, Circle_Summary_Dict):
 
     #More common interests gets bonus - check for minimum
     menteeMentorCommonInterestsMin = row[('MentorMentee_Common_Interests', 'min')]
-    menteeMentorCommonInterestsMax = row[('MentorMentee_Common_Interests', 'min')]
+    menteeMentorCommonInterestsMax = row[('MentorMentee_Common_Interests', 'max')]
     Circle_Summary_Dict['Mentor Mentee Minimum Interest Commonality'] = str(menteeMentorCommonInterestsMin) +" - "+ str(menteeMentorCommonInterestsMax)
     Circle_Summary_Dict['Mentor Mentee Interest Bonus'] = 0
     if menteeMentorCommonInterestsMin > 2:
@@ -257,7 +289,7 @@ def calculateCircleLevelBonusScore(row, Circle_Summary_Dict):
     menteeMentorCommonGoalsMax = row[('Goal_Similarity', 'max')]
     Circle_Summary_Dict['Mentor Mentee Min Goal Similarity'] = str(menteeMentorCommonGoalsMin) +" - "+ str(menteeMentorCommonGoalsMax)
     Circle_Summary_Dict['Mentor Mentee Goal Similarity Bonus'] = 0
-    if menteeMentorCommonGoalsMin > 0.2 and (menteeMentorCommonInterestsMax - menteeMentorCommonInterestsMin) < 0.3:
+    if menteeMentorCommonGoalsMin > 0.2 and (menteeMentorCommonGoalsMax - menteeMentorCommonGoalsMin) < 0.3:
         Circle_Summary_Dict['Mentor Mentee Goal Similarity Bonus'] = 2
         score += 2
 
@@ -275,6 +307,7 @@ def createSummary(Result_DF, regroup_DF):
     minCircleSize = regroup_DF.iloc[:,3].min()
     Summary_Results['Span Circle Size'] = str(minCircleSize)+" - "+str(maxCircleSize)
     if (maxCircleSize - minCircleSize) >5:
+        Summary_Results['Uneven Circle Size'] = 'Yes'
         Summary_Results['Uneven Circle Size Penalty'] = -2
         score -= 2
     
